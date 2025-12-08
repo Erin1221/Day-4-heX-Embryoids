@@ -1,0 +1,262 @@
+---
+title: "Reconstructing Lineage Trajectories and Fate Decisions in Day 4 heX-Embryoids"
+author: "Yirun Chen"
+date: "2025-11-10"
+output:
+  html_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE   # <--- disable warnings
+)
+```
+# Load packages
+```{r}
+pkgs <- c("Seurat", "SingleCellExperiment", "slingshot", "ggplot2", "dplyr")
+for (p in pkgs) {
+  if (!requireNamespace(p, quietly = TRUE)) {
+    if (p %in% c("SingleCellExperiment", "slingshot")) {
+      BiocManager::install(p)
+    } else {
+      install.packages(p)
+    }
+  }
+}
+library(Seurat)
+library(SingleCellExperiment)
+library(slingshot)
+library(ggplot2)
+library(dplyr)
+
+cat(">> Packages loaded.\n")
+```
+# Load data
+```{r}
+load("GSE247111_D4_Final_combined.RData")
+ls()
+```
+```{r}
+seu <- UpdateSeuratObject(D4_merged)
+```
+# Package setup
+```{r}
+# 0. Load required packages
+library(Seurat)
+library(SingleCellExperiment)
+library(slingshot)
+library(ggplot2)
+library(dplyr)
+
+# Output directory for figures and results
+out_dir <- "slingshot_D4_merged"
+if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
+
+cat(">> Seurat object 'seu' ready.\n")
+cat("   Cells:", ncol(seu), " Genes:", nrow(seu), "\n")
+
+# 1. Check / compute UMAP ======
+if (!"umap" %in% Seurat::Reductions(seu)) {
+  cat(">> No UMAP found. Running PCA + UMAP...\n")
+  
+  seu <- NormalizeData(seu)
+  seu <- FindVariableFeatures(seu)
+  seu <- ScaleData(seu)
+  seu <- RunPCA(seu, features = VariableFeatures(seu))
+  seu <- RunUMAP(seu, dims = 1:20)
+}
+
+# Plot the cluster structure on UMAP for inspection
+png(file.path(out_dir, "UMAP_clusters_D4_merged.png"),
+    width = 1600, height = 1600, res = 200)
+print(DimPlot(seu, reduction = "umap", group.by = "seurat_clusters",
+              label = TRUE, repel = TRUE) +
+        ggtitle("D4_merged - Seurat clusters"))
+dev.off()
+
+# 2. Convert Seurat object to SingleCellExperiment
+sce <- as.SingleCellExperiment(seu)
+
+# Add UMAP coordinates to SCE for slingshot
+reducedDims(sce)$UMAP <- seu@reductions$umap@cell.embeddings
+
+# Use Seurat clusters as cluster labels
+sce$cluster <- factor(seu$seurat_clusters)
+
+# 3. Run Slingshot
+sce <- slingshot(
+  sce,
+  clusterLabels = "cluster",
+  reducedDim    = "UMAP"
+)
+
+cat(">> Slingshot finished. Lineages:\n")
+print(slingshot::slingLineages(sce))
+
+# Extract pseudotime matrix
+pt <- slingPseudotime(sce)
+
+# Use the first lineage pseudotime as the main trajectory
+pt1 <- pt[, 1]
+
+# 4. Add pseudotime back to Seurat meta.data
+seu$slingshot_pt1 <- pt1
+
+# Save the Seurat object with pseudotime
+saveRDS(seu, file.path(out_dir, "D4_merged_seurat_with_slingshot_pt.rds"))
+
+# 5. Plot UMAP + pseudotime gradient
+df_umap <- as.data.frame(seu@reductions$umap@cell.embeddings)
+df_umap$cluster <- seu$seurat_clusters
+df_umap$pt1 <- pt1
+
+# 5.1 Color by cluster
+p1 <- ggplot(df_umap, aes(UMAP_1, UMAP_2, color = cluster)) +
+  geom_point(size = 0.3, alpha = 0.6) +
+  theme_classic() +
+  ggtitle("D4_merged - Seurat clusters")
+
+ggsave(file.path(out_dir, "UMAP_clusters_D4_merged.png"),
+       plot = p1, width = 6, height = 5, dpi = 300)
+
+# 5.2 Color by pseudotime
+p2 <- ggplot(df_umap, aes(UMAP_1, UMAP_2, color = pt1)) +
+  geom_point(size = 0.3, alpha = 0.8) +
+  scale_color_viridis_c(option = "plasma") +
+  theme_classic() +
+  ggtitle("D4_merged - Slingshot pseudotime (lineage 1)")
+
+ggsave(file.path(out_dir, "UMAP_pseudotime_D4_merged_slingshot.png"),
+       plot = p2, width = 6, height = 5, dpi = 300)
+
+# 5.3 Export pseudotime table
+pt_df <- data.frame(
+  cell          = colnames(seu),
+  slingshot_pt1 = pt1
+)
+write.csv(pt_df,
+          file.path(out_dir, "pseudotime_slingshot_lineage1_D4_merged.csv"),
+          row.names = FALSE)
+
+cat(">> DONE: Slingshot pseudotime for D4_merged completed.\n")
+cat("   Output directory:", normalizePath(out_dir), "\n")
+```
+# Function: plot_gene_pseudotime
+```{r}
+plot_gene_pseudotime <- function(seu, gene, pt_col = "slingshot_pt1") {
+  df <- data.frame(
+    pseudotime = seu[[pt_col]][,1],
+    expr = FetchData(seu, gene)[,1]
+  )
+  
+  ggplot(df, aes(x = pseudotime, y = expr)) +
+    geom_point(alpha = 0.3, size = 0.6, color = "gray40") +
+    geom_smooth(method = "loess", se = FALSE, color = "red", size = 1) +
+    theme_classic() +
+    labs(
+      title = paste0(gene, " expression over pseudotime"),
+      x = "Pseudotime",
+      y = "Expression"
+    )
+}
+```
+
+### Epiblast
+```{r}
+plot_gene_pseudotime(seu, "SOX2")
+```
+
+### Hypoblast
+```{r}
+plot_gene_pseudotime(seu, "GATA6")
+```
+
+### Definitive endoderm
+```{r}
+plot_gene_pseudotime(seu, "SOX17")
+```
+
+### Amnion
+```{r}
+plot_gene_pseudotime(seu, "ISL1")
+```
+
+### Primitive streak
+```{r}
+plot_gene_pseudotime(seu, "EOMES")
+```
+
+### YSE
+```{r}
+plot_gene_pseudotime(seu, "GATA4")
+```
+
+### YSM
+```{r}
+plot_gene_pseudotime(seu, "BST2")
+```
+
+### Haemogenic endothelium
+```{r}
+plot_gene_pseudotime(seu, "CD34")
+```
+
+### EMP / definitive-like haematopoiesis
+```{r}
+plot_gene_pseudotime(seu, "RUNX1")
+```
+
+# UMAP with Seurat clusters
+```{r}
+DimPlot(seu, reduction = "umap", label = TRUE)
+```
+
+### Epiblast marker
+```{r}
+FeaturePlot(seu, "SOX2")
+```
+
+### Amnion marker
+```{r}
+FeaturePlot(seu, "ISL1")
+```
+
+### Anterior hypoblast marker
+```{r}
+FeaturePlot(seu, "CER1")
+```
+
+### Primitive streak marker
+```{r}
+FeaturePlot(seu, "EOMES")
+```
+
+### YSE marker
+```{r}
+FeaturePlot(seu, "GATA4")
+```
+
+### YSM marker
+```{r}
+FeaturePlot(seu, "BST2")
+```
+
+### Hamatopoiesis marker
+```{r}
+FeaturePlot(seu, "CD34")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
