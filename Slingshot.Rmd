@@ -248,15 +248,8 @@ FeaturePlot(seu, "BST2")
 FeaturePlot(seu, "CD34")
 ```
 
-
-
-
-
-
-
-
-
-
-
-
+### EMP / definitive-like haematopoiesis marker
+```{r}
+FeaturePlot(seu, "RUNX1")
+```
 
